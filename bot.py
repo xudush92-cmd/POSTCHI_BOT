@@ -49,6 +49,7 @@ from config import (
     BOT_TOKEN, SUPER_ADMIN, BOT_USERNAME, ADMIN_CONTACT_PHONE,
     MEDIA_DIR, LOG_FILE, MAX_ADS_PER_USER,
     MIN_INTERVAL_MIN, MAX_INTERVAL_MIN, DEFAULT_INTERVAL_MIN,
+    TARIFF_DURATION_DAYS, WARN_BEFORE_DAYS, EXPIRY_CHECK_S,
     BTN_BACK, BTN_PHONE, BTN_ADS, BTN_REGION, BTN_START, BTN_STOP,
     BTN_STATUS, BTN_STATS, BTN_REFERRAL, BTN_LOGOUT,
     BTN_ADMIN_REGIONS, BTN_ADMIN_GROUPS, BTN_ADMIN_USERS,
@@ -650,6 +651,18 @@ async def _show_regions_for_user(update: Update) -> None:
 
 async def _user_start(update: Update) -> None:
     uid = update.effective_user.id
+
+    # Muddat tekshiruvi — tugagan bo'lsa pauza
+    if not is_super(uid) and await db.is_expired(uid):
+        await update.message.reply_text(
+            "⏸ Hisobingiz muddati tugagan.\n\n"
+            "E'lon yuborish to'xtatilgan. Muddatni uzaytirish uchun "
+            "admin bilan bog'laning:\n"
+            f"📞 {ADMIN_CONTACT_PHONE}",
+            reply_markup=await menu_for(uid),
+        )
+        return
+
     user = await db.get_user(uid)
     ad_id = (user or {}).get("active_ad_id")
     region_id = (user or {}).get("selected_region_id")
@@ -706,11 +719,20 @@ async def _user_status(update: Update) -> None:
     rname = region["name"] if region else "tanlanmagan"
     ad_preview = (ad.get("text_content") or "(rasm)")[:40] if ad else "tanlanmagan"
 
+    expires = (user or {}).get("expires_at")
+    if expires:
+        exp_line = f"📅 Muddat: {expires[:10]}"
+        if await db.is_expired(uid):
+            exp_line = "📅 Muddat: ⏸ TUGAGAN (admin bilan bog'laning)"
+    else:
+        exp_line = "📅 Muddat: belgilanmagan"
+
     await update.message.reply_text(
         "📊 HOLAT\n\n"
         f"Holat: {status}\n"
         f"🗺 Viloyat: {rname}\n"
         f"📢 Faol e'lon: {ad_preview}\n"
+        f"{exp_line}\n"
         f"📦 Jami e'lonlar: {ads_count}/{MAX_ADS_PER_USER}",
         reply_markup=await menu_for(uid),
     )
@@ -825,9 +847,12 @@ async def _admin_users(update: Update) -> None:
             continue
         name = u.get("name", str(u["uid"]))
         blocked = " 🚫" if u.get("is_blocked") else ""
-        lines.append(f"✅ {name} ({u['uid']}){blocked}")
+        exp = u.get("expires_at")
+        exp_str = f" | 📅 {exp[:10]}" if exp else ""
+        lines.append(f"✅ {name} ({u['uid']}){blocked}{exp_str}")
         rows.append([
-            InlineKeyboardButton(f"🚫 {name[:10]}", callback_data=f"ublk:{u['uid']}"),
+            InlineKeyboardButton(f"➕30k {name[:8]}", callback_data=f"uext:{u['uid']}"),
+            InlineKeyboardButton("🚫", callback_data=f"ublk:{u['uid']}"),
             InlineKeyboardButton("🗑", callback_data=f"udel:{u['uid']}"),
         ])
     await update.message.reply_text(
@@ -1005,12 +1030,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         target = int(target_s)
         if action == "ok":
             await db.set_approved(target, True)
-            logger.info("Tasdiqlandi: %s", target)
-            await q.edit_message_text(f"✅ Tasdiqlandi: {target}")
+            await db.set_expiry_days(target, TARIFF_DURATION_DAYS)
+            logger.info("Tasdiqlandi: %s (+%s kun)", target, TARIFF_DURATION_DAYS)
+            await q.edit_message_text(f"✅ Tasdiqlandi: {target} (+{TARIFF_DURATION_DAYS} kun)")
             with contextlib.suppress(Exception):
                 await context.bot.send_message(
                     target,
                     "✅ Hisobingiz tasdiqlandi!\n\n"
+                    f"📅 Muddat: {TARIFF_DURATION_DAYS} kun\n\n"
                     "Endi 📢 E'lon qo'shing, 🗺 Viloyat tanlang va ▶️ Boshlang.",
                     reply_markup=await menu_for(target),
                 )
@@ -1034,6 +1061,26 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     # ── Foydalanuvchi bloklash / o'chirish ───────────────────────────────
+    if data.startswith("uext:"):
+        if not is_super(uid):
+            return
+        target = int(data.split(":")[1])
+        await db.set_expiry_days(target, TARIFF_DURATION_DAYS)
+        new_exp = await db.get_expiry(target)
+        logger.info("Muddat uzaytirildi: %s (+%s kun)", target, TARIFF_DURATION_DAYS)
+        await q.edit_message_text(
+            f"✅ Muddat uzaytirildi: {target}\n📅 Yangi muddat: {(new_exp or '')[:10]}"
+        )
+        with contextlib.suppress(Exception):
+            await context.bot.send_message(
+                target,
+                f"✅ Hisobingiz muddati uzaytirildi!\n\n"
+                f"📅 +{TARIFF_DURATION_DAYS} kun\n"
+                "Endi ▶️ Boshlash bilan davom etishingiz mumkin.",
+                reply_markup=await menu_for(target),
+            )
+        return
+
     if data.startswith("ublk:"):
         if not is_super(uid):
             return
@@ -1291,13 +1338,62 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # MAIN
 # ═════════════════════════════════════════════════════════════════════════
 async def _post_init(app: Application) -> None:
-    """Bot ishga tushgach: baza, super admin, scheduler."""
+    """Bot ishga tushgach: baza, super admin, scheduler, muddat janitori."""
     global scheduler
     await db.init_db()
     await db.upsert_user(SUPER_ADMIN, is_approved=1)
     scheduler = Scheduler(app.bot)
     scheduler.start()
+    # Muddat janitori (fon vazifa)
+    app.create_task(_expiry_janitor(app))
     logger.info("POSTCHI_BOT tayyor")
+
+
+async def _expiry_janitor(app: Application) -> None:
+    """Har EXPIRY_CHECK_S soniyada: muddati tugaganlarni pauza qiladi
+    va oxirgi WARN_BEFORE_DAYS kun ichidagilarni kuniga 1 marta ogohlantiradi."""
+    await asyncio.sleep(10)  # bot to'liq ishga tushishini kutamiz
+    while True:
+        try:
+            # 1) Muddati tugagan + ishlayotganlarni pauza qilamiz
+            expired = await db.get_expired_running()
+            for uid in expired:
+                await db.set_running(uid, False)
+                logger.info("Muddat tugadi, pauza: %s", uid)
+                with contextlib.suppress(Exception):
+                    await app.bot.send_message(
+                        uid,
+                        "⏸ Hisobingiz muddati tugadi!\n\n"
+                        "E'lon yuborish to'xtatildi. Davom ettirish uchun "
+                        "admin bilan bog'laning:\n"
+                        f"📞 {ADMIN_CONTACT_PHONE}",
+                    )
+                with contextlib.suppress(Exception):
+                    u = await db.get_user(uid)
+                    name = (u or {}).get("name", str(uid))
+                    await app.bot.send_message(
+                        SUPER_ADMIN,
+                        f"⏸ Muddat tugadi: {name} ({uid})\n"
+                        "Uzaytirish uchun 👤 Foydalanuvchilar → ➕30k.",
+                    )
+
+            # 2) Oxirgi kunlarda ogohlantirish (kuniga 1 marta)
+            to_warn = await db.get_users_to_warn(WARN_BEFORE_DAYS)
+            for u in to_warn:
+                uid = u["uid"]
+                exp = u.get("expires_at", "")
+                with contextlib.suppress(Exception):
+                    await app.bot.send_message(
+                        uid,
+                        "⚠️ Diqqat! Hisobingiz muddati tugamoqda.\n\n"
+                        f"📅 Tugash sanasi: {exp[:10]}\n\n"
+                        "Uzaytirish uchun admin bilan bog'laning:\n"
+                        f"📞 {ADMIN_CONTACT_PHONE}",
+                    )
+                await db.mark_warned(uid)
+        except Exception as e:
+            logger.error("Expiry janitor xatosi: %s", e)
+        await asyncio.sleep(EXPIRY_CHECK_S)
 
 
 async def _post_shutdown(app: Application) -> None:

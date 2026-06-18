@@ -115,6 +115,8 @@ async def init_db() -> None:
                 pending_region_id INTEGER,
                 active_ad_id INTEGER,
                 running INTEGER DEFAULT 0,
+                expires_at TEXT,
+                warned_at TEXT,
                 referred_by INTEGER,
                 referral_counted INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -123,6 +125,8 @@ async def init_db() -> None:
 
         # Eski bazalar uchun idempotent migratsiya
         await _ensure_column(db, "users", "pending_region_id", "INTEGER")
+        await _ensure_column(db, "users", "expires_at", "TEXT")
+        await _ensure_column(db, "users", "warned_at", "TEXT")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS ads (
@@ -212,6 +216,72 @@ async def set_approved(uid: int, value: bool) -> None:
 
 async def set_blocked(uid: int, value: bool) -> None:
     await upsert_user(uid, is_blocked=1 if value else 0)
+
+
+# ── MUDDAT (30 kun, uzaytiriladi) ──────────────────────────────────────
+async def set_expiry_days(uid: int, days: int) -> None:
+    """Muddatni hozirdan +days kun qilib o'rnatadi. warned_at nollanadi."""
+    db = await _get_conn()
+    async with _op_lock:
+        await db.execute("INSERT OR IGNORE INTO users (uid) VALUES (?)", (uid,))
+        await db.execute(
+            "UPDATE users SET expires_at=datetime('now', ?), warned_at=NULL WHERE uid=?",
+            (f"+{int(days)} days", uid),
+        )
+        await db.commit()
+
+
+async def get_expiry(uid: int) -> str | None:
+    user = await get_user(uid)
+    return (user or {}).get("expires_at")
+
+
+async def is_expired(uid: int) -> bool:
+    """Muddat tugaganmi (expires_at o'tmishda)."""
+    db = await _get_conn()
+    async with _op_lock:
+        async with db.execute(
+            "SELECT expires_at FROM users WHERE uid=? "
+            "AND expires_at IS NOT NULL AND expires_at < datetime('now')",
+            (uid,),
+        ) as cur:
+            return await cur.fetchone() is not None
+
+
+async def get_expired_running() -> list[int]:
+    """Muddati tugagan VA hali ishlayotgan (running=1) userlar."""
+    db = await _get_conn()
+    async with _op_lock:
+        async with db.execute(
+            "SELECT uid FROM users WHERE expires_at IS NOT NULL "
+            "AND expires_at < datetime('now') AND running=1"
+        ) as cur:
+            return [r[0] for r in await cur.fetchall()]
+
+
+async def get_users_to_warn(warn_days: int) -> list[dict]:
+    """Muddati warn_days ichida tugaydigan, bugun hali ogohlantirilmagan userlar."""
+    db = await _get_conn()
+    async with _op_lock:
+        async with db.execute(
+            "SELECT * FROM users WHERE is_approved=1 AND is_blocked=0 "
+            "AND expires_at IS NOT NULL "
+            "AND expires_at > datetime('now') "
+            "AND expires_at <= datetime('now', ?) "
+            "AND (warned_at IS NULL OR warned_at < date('now'))",
+            (f"+{int(warn_days)} days",),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def mark_warned(uid: int) -> None:
+    """Bugun ogohlantirildi deb belgilaydi (kuniga 1 marta uchun)."""
+    db = await _get_conn()
+    async with _op_lock:
+        await db.execute(
+            "UPDATE users SET warned_at=datetime('now') WHERE uid=?", (uid,)
+        )
+        await db.commit()
 
 
 async def is_awaiting_approval(uid: int) -> bool:

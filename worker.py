@@ -92,6 +92,14 @@ class Scheduler:
             user = await db.get_user(uid)
             if not user or not user.get("running"):
                 continue
+
+            # Muddat tugagan bo'lsa — pauza (janitor soatda ishlaydi,
+            # bu yerda tezroq ushlaymiz: muddati tugagan user yubormasin)
+            if await db.is_expired(uid):
+                await db.set_running(uid, False)
+                logger.info("Muddat tugagan, yuborilmadi: %s", uid)
+                continue
+
             ad_id = user.get("active_ad_id")
             region_id = user.get("selected_region_id")
             if not ad_id or not region_id:

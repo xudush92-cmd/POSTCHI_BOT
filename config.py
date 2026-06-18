@@ -52,6 +52,11 @@ MAX_GROUP_FAILS = 3          # ketma-ket xato → guruh nofaol qilinadi
 # Cheklovlar
 MAX_ADS_PER_USER = 5         # foydalanuvchi 5 tagacha e'lon saqlaydi
 
+# Muddat (obuna)
+TARIFF_DURATION_DAYS = 30    # tasdiqlanganda beriladigan muddat (kun)
+WARN_BEFORE_DAYS = 3         # muddat tugashidan necha kun oldin ogohlantirish
+EXPIRY_CHECK_S = 3600        # muddat janitori har necha soniyada tekshiradi
+
 # Worker
 WORKER_TICK_S = 30           # worker har necha soniyada navbatni tekshiradi
 
