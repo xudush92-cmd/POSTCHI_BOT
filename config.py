@@ -45,7 +45,7 @@ MIN_INTERVAL_MIN = 1
 MAX_INTERVAL_MIN = 1440       # 24 soat
 
 # Yuborish (flood himoya)
-SEND_DELAY_S = 4              # guruhlar orasidagi kutish (soniya)
+SEND_DELAY_S = 10             # guruhlar orasidagi kutish (soniya)
 SEND_TIMEOUT_S = 20          # bitta yuborishga maksimal vaqt
 MAX_GROUP_FAILS = 3          # ketma-ket xato → guruh nofaol qilinadi
 
