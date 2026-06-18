@@ -625,9 +625,26 @@ async def _show_regions_for_user(update: Update) -> None:
             row = []
     if row:
         rows.append(row)
+
+    user = await db.get_user(uid)
+    current = (user or {}).get("selected_region_id")
+    pending = (user or {}).get("pending_region_id")
+    header = "🗺 Viloyatni tanlang (qavsda — guruhlar soni):"
+    if current:
+        cur_region = await db.get_region(current)
+        cur_name = cur_region["name"] if cur_region else "?"
+        header = (
+            f"🗺 Hozirgi viloyatingiz: {cur_name}\n\n"
+            "Boshqasini tanlasangiz — admin ruxsati so'raladi.\n"
+            "(Birinchi viloyat erkin tanlangan edi.)"
+        )
+        if pending:
+            pend_region = await db.get_region(pending)
+            pend_name = pend_region["name"] if pend_region else "?"
+            header += f"\n\n⏳ Kutilmoqda: {pend_name} (admin ruxsati)"
+
     await update.message.reply_text(
-        "🗺 Viloyatni tanlang (qavsda — guruhlar soni):",
-        reply_markup=InlineKeyboardMarkup(rows),
+        header, reply_markup=InlineKeyboardMarkup(rows)
     )
 
 
@@ -1178,9 +1195,84 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not region:
             await q.edit_message_text("⚠️ Viloyat topilmadi.")
             return
-        await db.set_selected_region(uid, region_id)
-        cnt = await db.count_groups_in_region(region_id)
-        await q.edit_message_text(f"✅ Viloyat tanlandi: {region['name']} ({cnt} guruh)")
+
+        user = await db.get_user(uid)
+        current = (user or {}).get("selected_region_id")
+
+        # Birinchi marta yoki xuddi shu viloyat — erkin tanlanadi
+        if not current:
+            await db.set_selected_region(uid, region_id)
+            cnt = await db.count_groups_in_region(region_id)
+            await q.edit_message_text(f"✅ Viloyat tanlandi: {region['name']} ({cnt} guruh)")
+            return
+        if current == region_id:
+            await q.edit_message_text(f"✅ Viloyat allaqachon tanlangan: {region['name']}")
+            return
+
+        # Boshqa viloyatga o'tish — admin ruxsati kerak
+        await db.set_pending_region(uid, region_id)
+        cur_region = await db.get_region(current)
+        cur_name = cur_region["name"] if cur_region else "?"
+        await q.edit_message_text(
+            f"⏳ Viloyatni almashtirish uchun admin ruxsati kerak.\n\n"
+            f"🗺 {cur_name} → {region['name']}\n\n"
+            "So'rovingiz adminga yuborildi. Ruxsat berilgach, yangi viloyat "
+            "faollashadi. Hozircha eski viloyatga e'lon ketaveradi."
+        )
+        # Adminga so'rov
+        u = await db.get_user(uid)
+        uname = (u or {}).get("name", str(uid))
+        phone = (u or {}).get("phone", "")
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Ruxsat", callback_data=f"rchg:ok:{uid}"),
+            InlineKeyboardButton("⛔ Rad", callback_data=f"rchg:no:{uid}"),
+        ]])
+        with contextlib.suppress(Exception):
+            await context.bot.send_message(
+                SUPER_ADMIN,
+                "🔔 Viloyatni almashtirish so'rovi\n\n"
+                f"👤 {uname}\n"
+                f"📱 {phone}\n"
+                f"🆔 {uid}\n\n"
+                f"🗺 {cur_name} → {region['name']}",
+                reply_markup=kb,
+            )
+        return
+
+    # ── Viloyat almashtirish — admin javobi ──────────────────────────────
+    if data.startswith("rchg:"):
+        if not is_super(uid):
+            return
+        _, action, target_s = data.split(":")
+        target = int(target_s)
+        pending = await db.get_pending_region(target)
+        if not pending:
+            await q.edit_message_text("⚠️ So'rov topilmadi (bekor qilingan bo'lishi mumkin).")
+            return
+        region = await db.get_region(pending)
+        rname = region["name"] if region else "?"
+        if action == "ok":
+            await db.set_selected_region(target, pending)
+            await db.set_pending_region(target, None)
+            await q.edit_message_text(f"✅ Ruxsat berildi: {target} → {rname}")
+            with contextlib.suppress(Exception):
+                await context.bot.send_message(
+                    target,
+                    f"✅ Viloyat almashtirishga ruxsat berildi!\n\n"
+                    f"🗺 Yangi viloyat: {rname}\n"
+                    "Endi e'loningiz shu viloyat guruhlariga ketadi.",
+                    reply_markup=await menu_for(target),
+                )
+        else:
+            await db.set_pending_region(target, None)
+            await q.edit_message_text(f"⛔ Rad etildi: {target}")
+            with contextlib.suppress(Exception):
+                await context.bot.send_message(
+                    target,
+                    "❌ Viloyatni almashtirish rad etildi.\n"
+                    "Eski viloyatingiz saqlanib qoldi.",
+                    reply_markup=await menu_for(target),
+                )
         return
 
     # ── Logout ───────────────────────────────────────────────────────────

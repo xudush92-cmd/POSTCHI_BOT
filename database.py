@@ -64,6 +64,16 @@ async def close_db() -> None:
 # ─────────────────────────────────────────────────────────────────────────
 # INIT
 # ─────────────────────────────────────────────────────────────────────────
+async def _ensure_column(db, table: str, column: str, decl: str) -> None:
+    """Ustun mavjud bo'lmasa qo'shadi (idempotent migratsiya).
+    MUHIM: _op_lock USHLAB TURILGAN holatda chaqiriladi — o'zi lock OLMAYDI."""
+    async with db.execute(f"PRAGMA table_info({table})") as cur:
+        rows = await cur.fetchall()
+    cols = {r[1] for r in rows}
+    if column not in cols:
+        await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 async def init_db() -> None:
     db = await _get_conn()
     async with _op_lock:
@@ -102,6 +112,7 @@ async def init_db() -> None:
                 is_blocked INTEGER DEFAULT 0,
                 awaiting_approval INTEGER DEFAULT 0,
                 selected_region_id INTEGER,
+                pending_region_id INTEGER,
                 active_ad_id INTEGER,
                 running INTEGER DEFAULT 0,
                 referred_by INTEGER,
@@ -109,6 +120,9 @@ async def init_db() -> None:
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # Eski bazalar uchun idempotent migratsiya
+        await _ensure_column(db, "users", "pending_region_id", "INTEGER")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS ads (
@@ -211,6 +225,16 @@ async def set_awaiting_approval(uid: int, value: bool) -> None:
 
 async def set_selected_region(uid: int, region_id: int | None) -> None:
     await upsert_user(uid, selected_region_id=region_id)
+
+
+async def set_pending_region(uid: int, region_id: int | None) -> None:
+    """Viloyat almashtirish so'rovi (admin tasdiqlashini kutadi)."""
+    await upsert_user(uid, pending_region_id=region_id)
+
+
+async def get_pending_region(uid: int) -> int | None:
+    user = await get_user(uid)
+    return (user or {}).get("pending_region_id")
 
 
 async def set_active_ad(uid: int, ad_id: int | None) -> None:
