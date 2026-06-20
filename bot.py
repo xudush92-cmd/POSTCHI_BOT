@@ -777,7 +777,10 @@ async def _user_logout(update: Update) -> None:
         InlineKeyboardButton("❌ Yo'q", callback_data="lo:no"),
     ]])
     await update.message.reply_text(
-        "🚪 Chiqasizmi? E'lon yuborish to'xtaydi.", reply_markup=kb
+        "🚪 Chiqishni tasdiqlaysizmi?\n\n"
+        "⚠️ DIQQAT: barcha ma'lumotlaringiz (e'lonlar, tanlangan viloyat, "
+        "hisobingiz) BUTUNLAY o'chiriladi. Qaytadan ro'yxatdan o'tish kerak bo'ladi.",
+        reply_markup=kb,
     )
 
 
@@ -1324,10 +1327,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # ── Logout ───────────────────────────────────────────────────────────
     if data == "lo:yes":
-        await db.set_running(uid, False)
-        await q.edit_message_text("🚪 Chiqdingiz. E'lon yuborish to'xtatildi.")
+        # E'lon rasmlarini diskdan o'chiramiz
         with contextlib.suppress(Exception):
-            await context.bot.send_message(uid, "🏠 Bosh menyu", reply_markup=await menu_for(uid))
+            ads = await db.get_ads(uid)
+            for a in ads:
+                _safe_unlink(a.get("photo_path"))
+        # Foydalanuvchini va barcha ma'lumotlarini butunlay o'chiramiz
+        await db.set_running(uid, False)
+        await db.delete_user(uid)
+        await q.edit_message_text(
+            "🚪 Chiqdingiz. Barcha ma'lumotlaringiz o'chirildi.\n"
+            "Qaytadan foydalanish uchun /start bosing."
+        )
         return
     if data == "lo:no":
         await q.edit_message_text("✅ Bekor qilindi.")

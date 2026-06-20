@@ -79,10 +79,14 @@ def _contact_url(contact: str) -> str | None:
         return f"https://t.me/{c[1:]}"
     if c.startswith("https://t.me/") or c.startswith("http"):
         return c
-    # Telefon raqam — tel: link
-    digits = c.lstrip("+")
+    # Telefon raqam — t.me havola (tel: Telegram inline tugmada ISHLAMAYDI,
+    # BadRequest beradi va e'lon umuman yuborilmaydi). t.me/+998... esa
+    # Telegram qabul qiladigan to'g'ri havola.
+    cleaned = c.replace(" ", "").replace("-", "")
+    digits = cleaned.lstrip("+")
     if digits.isdigit():
-        return f"tel:{c}"
+        num = cleaned if cleaned.startswith("+") else "+" + cleaned
+        return f"https://t.me/{num}"
     return None
 
 
